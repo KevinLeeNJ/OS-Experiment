@@ -5,6 +5,7 @@
 #include "process.h"
 
 #define MAX_CMDLINE_ARGS 64
+#define MAX_SYMBOLS 100
 
 // elf header structure
 typedef struct elf_header_t {
@@ -37,8 +38,34 @@ typedef struct elf_prog_header_t {
   uint64 align;  /* Segment alignment */
 } elf_prog_header;
 
+// Section header.
+typedef struct elf_sect_header_t {
+  uint32 name;
+  uint32 type;
+  uint64 flags;
+  uint64 addr;
+  uint64 offset;
+  uint64 size;
+  uint32 link;
+  uint32 info;
+  uint64 addralign;
+  uint64 entsize;
+} elf_sect_header;
+
+// Symbol table entry.
+typedef struct elf_sym_t {
+  uint32 st_name;
+  uint8 st_info;
+  uint8 st_other;
+  uint16 st_shndx;
+  uint64 st_value;
+  uint64 st_size;
+} elf_sym;
+
 #define ELF_MAGIC 0x464C457FU  // "\x7FELF" in little endian
 #define ELF_PROG_LOAD 1
+#define SHT_SYMTAB 2
+#define SHT_STRTAB 3
 
 typedef enum elf_status_t {
   EL_OK = 0,
@@ -57,6 +84,8 @@ typedef struct elf_ctx_t {
 
 elf_status elf_init(elf_ctx *ctx, void *info);
 elf_status elf_load(elf_ctx *ctx);
+elf_status elf_load_symbols(elf_ctx *ctx, symbol_table *symtab);
+const char* addr2symbol(symbol_table *symtab, uint64 addr);
 
 void load_bincode_from_host_elf(process *p);
 

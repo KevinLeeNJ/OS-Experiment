@@ -130,6 +130,9 @@ void load_bincode_from_host_elf(process *p) {
   // load elf. elf_load() is defined above.
   if (elf_load(&elfloader) != EL_OK) panic("Fail on loading elf.\n");
 
+  // load symbols
+  if (elf_load_symbols(&elfloader, &p->symtab) != EL_OK) panic("Fail on loading symbols.\n");
+
   // entry (virtual, also physical in lab1_x) address
   p->trapframe->epc = elfloader.ehdr.entry;
 
@@ -137,4 +140,75 @@ void load_bincode_from_host_elf(process *p) {
   spike_file_close( info.f );
 
   sprint("Application program entry point (virtual address): 0x%lx\n", p->trapframe->epc);
+}
+
+elf_status elf_load_symbols(elf_ctx *ctx, symbol_table *symtab) {
+  symtab->num_symbols = 0;
+
+  // find .symtab and .strtab sections
+  elf_sect_header sh_addr;
+  int symtab_idx = -1, strtab_idx = -1;
+  static char shstr[4096];
+  char *shstrtab = shstr;
+
+  // load section header string table
+  if (ctx->ehdr.shstrndx != 0) {
+    uint64 off = ctx->ehdr.shoff + ctx->ehdr.shstrndx * sizeof(sh_addr);
+    if (elf_fpread(ctx, &sh_addr, sizeof(sh_addr), off) != sizeof(sh_addr)) return EL_EIO;
+    if (sh_addr.size > 4096) return EL_ENOMEM;
+    if (elf_fpread(ctx, shstrtab, sh_addr.size, sh_addr.offset) != sh_addr.size) return EL_EIO;
+  }
+
+  // traverse section headers
+  for (int i = 0; i < ctx->ehdr.shnum; i++) {
+    uint64 off = ctx->ehdr.shoff + i * sizeof(sh_addr);
+    if (elf_fpread(ctx, &sh_addr, sizeof(sh_addr), off) != sizeof(sh_addr)) return EL_EIO;
+    if (shstrtab && strcmp(&shstrtab[sh_addr.name], ".symtab") == 0) {
+      symtab_idx = i;
+    } else if (shstrtab && strcmp(&shstrtab[sh_addr.name], ".strtab") == 0) {
+      strtab_idx = i;
+    }
+  }
+
+  if (symtab_idx == -1 || strtab_idx == -1) {
+    return EL_OK; // no symbols
+  }
+
+  // load strtab
+  uint64 off = ctx->ehdr.shoff + strtab_idx * sizeof(sh_addr);
+  if (elf_fpread(ctx, &sh_addr, sizeof(sh_addr), off) != sizeof(sh_addr)) return EL_EIO;
+  static char strtab[4096];
+  if (sh_addr.size > 4096) return EL_ENOMEM;
+  if (elf_fpread(ctx, strtab, sh_addr.size, sh_addr.offset) != sh_addr.size) return EL_EIO;
+
+  // load symtab
+  off = ctx->ehdr.shoff + symtab_idx * sizeof(sh_addr);
+  if (elf_fpread(ctx, &sh_addr, sizeof(sh_addr), off) != sizeof(sh_addr)) return EL_EIO;
+  int symnum = sh_addr.size / sizeof(elf_sym);
+  static elf_sym syms[100];
+  if (symnum > 100) return EL_ENOMEM;
+  if (elf_fpread(ctx, syms, sh_addr.size, sh_addr.offset) != sh_addr.size) return EL_EIO;
+
+  // fill symtab
+  for (int i = 0; i < symnum && symtab->num_symbols < 100; i++) {
+    if (syms[i].st_name && syms[i].st_value && ((syms[i].st_info & 0xf) == 2)) { // FUNC
+      symbol *s = &symtab->symbols[symtab->num_symbols];
+      s->addr = syms[i].st_value;
+      s->size = syms[i].st_size;
+      strcpy(s->name, &strtab[syms[i].st_name]);
+      symtab->num_symbols++;
+    }
+  }
+
+  return EL_OK;
+}
+
+const char* addr2symbol(symbol_table *symtab, uint64 addr) {
+  for (int i = 0; i < symtab->num_symbols; i++) {
+    symbol *s = &symtab->symbols[i];
+    if (s->addr <= addr && addr < s->addr + s->size) {
+      return s->name;
+    }
+  }
+  return "unknown";
 }

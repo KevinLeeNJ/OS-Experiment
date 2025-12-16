@@ -15,12 +15,25 @@ typedef struct trapframe_t {
   /* offset:264 */ uint64 epc;
 }trapframe;
 
+typedef struct symbol_t {
+  uint64 addr;
+  uint64 size;
+  char name[64];
+} symbol;
+
+typedef struct symbol_table_t {
+  symbol symbols[100];
+  int num_symbols;
+} symbol_table;
+
 // the extremely simple definition of process, used for begining labs of PKE
 typedef struct process_t {
   // pointing to the stack used in trap handling.
   uint64 kstack;
   // trapframe storing the context of a (User mode) process.
   trapframe* trapframe;
+  // symbol table for address to symbol resolution
+  symbol_table symtab;
 }process;
 
 void switch_to(process*);
