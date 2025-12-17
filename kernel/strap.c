@@ -61,6 +61,7 @@ void handle_user_page_fault(uint64 mcause, uint64 sepc, uint64 stval) {
       // dynamically increase application stack.
       // hint: first allocate a new physical page, and then, maps the new page to the
       // virtual address that causes the page fault.
+      {
       uint64 pa = (uint64)alloc_page();
       if (pa == 0) {
         panic("handle_user_page_fault: out of memory");
@@ -72,6 +73,7 @@ void handle_user_page_fault(uint64 mcause, uint64 sepc, uint64 stval) {
       }
 
       break;
+    }
     default:
       sprint("unknown page fault.\n");
       break;
