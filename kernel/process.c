@@ -183,6 +183,7 @@ int do_fork( process* parent)
 {
   sprint( "will fork a child from parent %d.\n", parent->pid );
   process* child = alloc_process();
+  child->pfiles->cwd = parent->pfiles->cwd;
 
   for( int i=0; i<parent->total_mapped_region; i++ ){
     // browse parent's vm space, and copy its trapframe and data segments,

@@ -5,6 +5,7 @@
 #include "vfs.h"
 
 #include "pmm.h"
+#include "process.h"
 #include "spike_interface/spike_utils.h"
 #include "util/string.h"
 #include "util/types.h"
@@ -109,7 +110,7 @@ struct super_block *vfs_mount(const char *dev_name, int mnt_type) {
 // return: the file pointer to the opened file.
 //
 struct file *vfs_open(const char *path, int flags) {
-  struct dentry *parent = vfs_root_dentry; // we start the path lookup from root.
+  struct dentry *parent = (path[0] == '/') ? vfs_root_dentry : current->pfiles->cwd;
   char miss_name[MAX_PATH_LEN];
 
   // path lookup.
@@ -260,7 +261,7 @@ int vfs_disk_stat(struct file *file, struct istat *istat) {
 // return: -1 on failure, 0 on success.
 //
 int vfs_link(const char *oldpath, const char *newpath) {
-  struct dentry *parent = vfs_root_dentry;
+  struct dentry *parent = (oldpath[0] == '/') ? vfs_root_dentry : current->pfiles->cwd;
   char miss_name[MAX_PATH_LEN];
 
   // lookup oldpath
@@ -276,7 +277,7 @@ int vfs_link(const char *oldpath, const char *newpath) {
     return -1;
   }
 
-  parent = vfs_root_dentry;
+  parent = (newpath[0] == '/') ? vfs_root_dentry : current->pfiles->cwd;
   // lookup the newpath
   // note that parent is changed to be the last directory entry to be accessed
   struct dentry *new_file_dentry =
@@ -310,7 +311,7 @@ int vfs_link(const char *oldpath, const char *newpath) {
 // return: -1 on failure, 0 on success.
 //
 int vfs_unlink(const char *path) {
-  struct dentry *parent = vfs_root_dentry;
+  struct dentry *parent = (path[0] == '/') ? vfs_root_dentry : current->pfiles->cwd;
   char miss_name[MAX_PATH_LEN];
 
   // lookup the file, find its parent direntry
@@ -399,7 +400,7 @@ int vfs_close(struct file *file) {
 // open a dir at vfs layer. the directory must exist on disk.
 //
 struct file *vfs_opendir(const char *path) {
-  struct dentry *parent = vfs_root_dentry;
+  struct dentry *parent = (path[0] == '/') ? vfs_root_dentry : current->pfiles->cwd;
   char miss_name[MAX_PATH_LEN];
 
   // lookup the dir
@@ -443,7 +444,7 @@ int vfs_readdir(struct file *file, struct dir *dir) {
 // and its parent directory must exist.
 //
 int vfs_mkdir(const char *path) {
-  struct dentry *parent = vfs_root_dentry;
+  struct dentry *parent = (path[0] == '/') ? vfs_root_dentry : current->pfiles->cwd;
   char miss_name[MAX_PATH_LEN];
 
   // lookup the dir, find its parent direntry
@@ -522,35 +523,43 @@ struct dentry *lookup_final_dentry(const char *path, struct dentry **parent,
   struct dentry *this = *parent;
 
   while (token != NULL) {
-    *parent = this;
-    this = hash_get_dentry((*parent), token);  // try hash first
-    if (this == NULL) {
-      // if not found in hash, try to find it in the directory
-      this = alloc_vfs_dentry(token, NULL, *parent);
-      // lookup subfolder/file in its parent directory. note:
-      // hostfs and rfs will take different procedures for lookup.
-      struct vinode *found_vinode = viop_lookup((*parent)->dentry_inode, this);
-      if (found_vinode == NULL) {
-        // not found in both hash table and directory file on disk.
-        free_page(this);
-        strcpy(miss_name, token);
-        return NULL;
+    if (strcmp(token, ".") == 0) {
+      // do nothing
+    } else if (strcmp(token, "..") == 0) {
+      if (this->parent != NULL) {
+        this = this->parent;
       }
+    } else {
+      *parent = this;
+      this = hash_get_dentry((*parent), token);  // try hash first
+      if (this == NULL) {
+        // if not found in hash, try to find it in the directory
+        this = alloc_vfs_dentry(token, NULL, *parent);
+        // lookup subfolder/file in its parent directory. note:
+        // hostfs and rfs will take different procedures for lookup.
+        struct vinode *found_vinode = viop_lookup((*parent)->dentry_inode, this);
+        if (found_vinode == NULL) {
+          // not found in both hash table and directory file on disk.
+          free_page(this);
+          strcpy(miss_name, token);
+          return NULL;
+        }
 
-      struct vinode *same_inode = hash_get_vinode(found_vinode->sb, found_vinode->inum);
-      if (same_inode != NULL) {
-        // the vinode is already in the hash table (i.e. we are opening another hard link)
-        this->dentry_inode = same_inode;
-        same_inode->ref++;
-        free_page(found_vinode);
-      } else {
-        // the vinode is not in the hash table
-        this->dentry_inode = found_vinode;
-        found_vinode->ref++;
-        hash_put_vinode(found_vinode);
+        struct vinode *same_inode = hash_get_vinode(found_vinode->sb, found_vinode->inum);
+        if (same_inode != NULL) {
+          // the vinode is already in the hash table (i.e. we are opening another hard link)
+          this->dentry_inode = same_inode;
+          same_inode->ref++;
+          free_page(found_vinode);
+        } else {
+          // the vinode is not in the hash table
+          this->dentry_inode = found_vinode;
+          found_vinode->ref++;
+          hash_put_vinode(found_vinode);
+        }
+
+        hash_put_dentry(this);
       }
-
-      hash_put_dentry(this);
     }
 
     // get next token
