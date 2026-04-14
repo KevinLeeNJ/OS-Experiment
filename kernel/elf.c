@@ -8,6 +8,12 @@
 #include "riscv.h"
 #include "spike_interface/spike_utils.h"
 
+// Static buffer to hold .debug_line section data plus the dir/file/line arrays
+// that make_addr_line() appends after it. 512 KB is sufficient for typical
+// user programs compiled with -g.
+#define DEBUG_LINE_BUF_SIZE (512 * 1024)
+static char debug_line_buf[DEBUG_LINE_BUF_SIZE];
+
 typedef struct elf_info_t {
   spike_file_t *f;
   process *p;
@@ -248,6 +254,117 @@ static size_t parse_args(arg_buf *arg_bug_msg) {
   return pk_argc - arg;
 }
 
+// Static buffer for the fully-constructed source path returned by locate_src_line.
+static char src_path_buf[512];
+
+//
+// locate_src_line: given a faulting instruction address, look it up in the
+// debug line number table of the current process and return the matching
+// source file path and line number.
+//
+// Returns 1 on success (filePath and line are set), 0 if debug info is absent
+// or the address is not found.
+//
+int locate_src_line(uint64 addr, const char **out_file, uint64 *out_line) {
+  extern process *current;
+  if (!current || !current->line || current->line_ind == 0)
+    return 0;
+
+  // Find the entry whose address is the largest value that is <= addr.
+  // The table is NOT necessarily sorted, so we do a linear scan.
+  int best = -1;
+  uint64 best_addr = 0;
+  for (int i = 0; i < current->line_ind; i++) {
+    uint64 a = current->line[i].addr;
+    if (a <= addr && (best < 0 || a > best_addr)) {
+      best = i;
+      best_addr = a;
+    }
+  }
+  if (best < 0)
+    return 0;
+
+  uint64 file_idx = current->line[best].file;  // index into current->file[]
+  uint64 dir_idx  = current->file[file_idx].dir; // index into current->dir[]
+  const char *fname = current->file[file_idx].file;
+  const char *dname = current->dir[dir_idx];
+
+  // Build the full path: if dir is empty or "." use just the filename.
+  if (dname == 0 || dname[0] == '\0' ||
+      (dname[0] == '.' && dname[1] == '\0')) {
+    // No meaningful directory prefix.
+    // snprintf is not available; use manual copy.
+    int i = 0;
+    while (fname[i] && i < (int)sizeof(src_path_buf) - 1) {
+      src_path_buf[i] = fname[i]; i++;
+    }
+    src_path_buf[i] = '\0';
+  } else {
+    // "dir/file"
+    int i = 0;
+    while (dname[i] && i < (int)sizeof(src_path_buf) - 2) {
+      src_path_buf[i] = dname[i]; i++;
+    }
+    src_path_buf[i++] = '/';
+    int j = 0;
+    while (fname[j] && i < (int)sizeof(src_path_buf) - 1) {
+      src_path_buf[i++] = fname[j++];
+    }
+    src_path_buf[i] = '\0';
+  }
+
+  *out_file = src_path_buf;
+  *out_line = current->line[best].line;
+  return 1;
+}
+
+// Line-read buffer — large enough for a typical source line.
+static char src_line_buf[256];
+
+//
+// print_src_location: given a PC address, find the corresponding source file
+// and line number, print "Runtime error at <file>:<line>", then open the
+// source file and print the exact source line (indented by two spaces).
+//
+void print_src_location(uint64 addr) {
+  const char *src_file;
+  uint64 src_line;
+  if (!locate_src_line(addr, &src_file, &src_line))
+    return;
+
+  sprint("Runtime error at %s:%d\n", src_file, src_line);
+
+  // Try to open the source file and print the matching line.
+  spike_file_t *f = spike_file_open(src_file, O_RDONLY, 0);
+  if (IS_ERR_VALUE(f))
+    return;
+
+  // Scan line-by-line until we reach line src_line (1-based).
+  uint64 cur_line = 1;
+  uint64 off = 0;
+  char ch;
+  // We print the line once we enter it.
+  if (cur_line == src_line) {
+    sprint("  ");
+  }
+  while (spike_file_pread(f, &ch, 1, off++) == 1) {
+    if (cur_line == src_line) {
+      if (ch == '\n') {
+        sprint("\n");
+        break;
+      }
+      // Buffer the char for output (print char by char into a small buf).
+      char tmp[2] = {ch, '\0'};
+      sprint("%s", tmp);
+    } else if (ch == '\n') {
+      cur_line++;
+      if (cur_line == src_line) {
+        sprint("  ");
+      }
+    }
+  }
+  spike_file_close(f);
+}
 //
 // load the elf of user application, by using the spike file interface.
 //
@@ -279,6 +396,56 @@ void load_bincode_from_host_elf(process *p) {
 
   // entry (virtual, also physical in lab1_x) address
   p->trapframe->epc = elfloader.ehdr.entry;
+
+  // ---------- load .debug_line section for source-line mapping ----------
+  elf_header *eh = &elfloader.ehdr;
+
+  // Step 1: load the section-header string table (.shstrtab) so we can
+  // compare section names.
+  elf_sect_header shstr_sh;
+  uint64 shstr_off = eh->shoff + (uint64)eh->shstrndx * sizeof(elf_sect_header);
+  if (elf_fpread(&elfloader, &shstr_sh, sizeof(shstr_sh), shstr_off)
+      == sizeof(shstr_sh)) {
+    // Read the shstrtab content into a temporary region of the debug buffer.
+    // We keep it at the END of the buffer so it won't clash with debug_line data
+    // at the beginning.
+    uint64 shstrtab_size = shstr_sh.size;
+    if (shstrtab_size > DEBUG_LINE_BUF_SIZE / 2)
+      shstrtab_size = DEBUG_LINE_BUF_SIZE / 2;
+    char *shstrtab = debug_line_buf + DEBUG_LINE_BUF_SIZE - shstrtab_size;
+    elf_fpread(&elfloader, shstrtab, shstrtab_size, shstr_sh.offset);
+
+    // Step 2: walk all section headers looking for ".debug_line".
+    uint64 debug_line_offset = 0, debug_line_size = 0;
+    for (int si = 0; si < eh->shnum; si++) {
+      elf_sect_header sh;
+      uint64 sh_off = eh->shoff + (uint64)si * sizeof(elf_sect_header);
+      if (elf_fpread(&elfloader, &sh, sizeof(sh), sh_off) != sizeof(sh))
+        break;
+      // sh.name is an index into shstrtab
+      const char *sname = shstrtab + sh.name;
+      if (strcmp(sname, ".debug_line") == 0) {
+        debug_line_offset = sh.offset;
+        debug_line_size   = sh.size;
+        break;
+      }
+    }
+
+    // Step 3: read .debug_line into the front of debug_line_buf and parse it.
+    if (debug_line_size > 0) {
+      // Make sure the data fits *and* leaves room for the dir/file/line arrays
+      // that make_addr_line() places right after the raw data.
+      uint64 space_needed = debug_line_size + 64 * sizeof(char *)
+                            + 64 * sizeof(code_file)
+                            + 4096 * sizeof(addr_line) + 8;
+      if (space_needed <= (uint64)(shstrtab - debug_line_buf)) {
+        elf_fpread(&elfloader, debug_line_buf, debug_line_size,
+                   debug_line_offset);
+        make_addr_line(&elfloader, debug_line_buf, debug_line_size);
+      }
+    }
+  }
+  // ----------------------------------------------------------------------
 
   // close the host spike file
   spike_file_close( info.f );

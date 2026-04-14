@@ -85,6 +85,15 @@ typedef struct elf_ctx_t {
 elf_status elf_init(elf_ctx *ctx, void *info);
 elf_status elf_load(elf_ctx *ctx);
 
+void make_addr_line(elf_ctx *ctx, char *debug_line, uint64 length);
+
+// look up the source file path and line number for a given instruction address.
+// returns 1 on success (and fills *out_file / *out_line), 0 if no info found.
+int locate_src_line(uint64 addr, const char **out_file, uint64 *out_line);
+
+// print "Runtime error at <file>:<line>\n  <source line>\n" for the given PC.
+void print_src_location(uint64 addr);
+
 void load_bincode_from_host_elf(process *p);
 
 #endif

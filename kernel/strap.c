@@ -6,6 +6,7 @@
 #include "process.h"
 #include "strap.h"
 #include "syscall.h"
+#include "elf.h"
 
 #include "spike_interface/spike_utils.h"
 
