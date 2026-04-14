@@ -5,6 +5,7 @@
 #include "util/types.h"
 #include "kernel/riscv.h"
 #include "kernel/config.h"
+#include "kernel/sync_utils.h"
 #include "spike_interface/spike_utils.h"
 
 //
@@ -29,6 +30,7 @@ extern uint64 g_mem_size;
 // struct riscv_regs is define in kernel/riscv.h, and g_itrframe is used to save
 // registers when interrupt hapens in M mode. added @lab1_2
 riscv_regs g_itrframe;
+static volatile int g_global_init_barrier = 0;
 
 //
 // get the information of HTIF (calling interface) and the emulated memory by
@@ -91,15 +93,18 @@ void timerinit(uintptr_t hartid) {
 // m_start: machine mode C entry point.
 //
 void m_start(uintptr_t hartid, uintptr_t dtb) {
-  // init the spike file interface (stdin,stdout,stderr)
-  // functions with "spike_" prefix are all defined in codes under spike_interface/,
-  // sprint is also defined in spike_interface/spike_utils.c
-  spike_file_init();
-  sprint("In m_start, hartid:%d\n", hartid);
+  write_tp(hartid);
 
-  // init HTIF (Host-Target InterFace) and memory by using the Device Table Blob (DTB)
-  // init_dtb() is defined above.
-  init_dtb(dtb);
+  // global platform init should happen once.
+  if (hartid == 0) {
+    // init the spike file interface (stdin,stdout,stderr)
+    spike_file_init();
+    sprint("In m_start, hartid:%d\n", hartid);
+    // init HTIF and memory by using the Device Table Blob (DTB)
+    init_dtb(dtb);
+  }
+  sync_barrier(&g_global_init_barrier, NCPU);
+  if (hartid != 0) sprint("In m_start, hartid:%d\n", hartid);
 
   // save the address of trap frame for interrupt in M mode to "mscratch". added @lab1_2
   write_csr(mscratch, &g_itrframe);
