@@ -44,6 +44,9 @@ void load_user_program(process *proc) {
   // allocate a page to store page directory. added @lab2_1
   proc->pagetable = (pagetable_t)alloc_page();
   memset((void *)proc->pagetable, 0, PGSIZE);
+  proc->heap_top = USER_FREE_ADDRESS_START;
+  proc->heap_block_num = 0;
+  memset(proc->heap_blocks, 0, sizeof(proc->heap_blocks));
 
   // allocate pages to both user-kernel stack and user app itself. added @lab2_1
   proc->kstack = (uint64)alloc_page() + PGSIZE;   //user kernel stack top
