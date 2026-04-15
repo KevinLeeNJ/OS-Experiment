@@ -93,6 +93,30 @@ static void heap_extend(process *proc, uint64 need_size) {
   heap_coalesce(proc);
 }
 
+static void heap_reclaim_top_pages(process *proc) {
+  while (proc->heap_block_num > 0) {
+    int last = proc->heap_block_num - 1;
+    heap_block *blk = &proc->heap_blocks[last];
+    uint64 blk_end = blk->va + blk->size;
+
+    if (blk->in_use || blk_end != proc->heap_top)
+      break;
+
+    uint64 reclaim_start = ROUNDUP(blk->va, PGSIZE);
+    if (reclaim_start >= proc->heap_top)
+      break;
+
+    for (uint64 va = reclaim_start; va < proc->heap_top; va += PGSIZE)
+      user_vm_unmap((pagetable_t)proc->pagetable, va, PGSIZE, 1);
+
+    proc->heap_top = reclaim_start;
+    if (reclaim_start == blk->va)
+      heap_remove_block(proc, last);
+    else
+      blk->size = reclaim_start - blk->va;
+  }
+}
+
 //
 // implement the SYS_user_print syscall
 //
@@ -142,6 +166,7 @@ uint64 sys_user_free_page(uint64 va) {
     if (current->heap_blocks[i].va == va) {
       current->heap_blocks[i].in_use = 0;
       heap_coalesce(current);
+      heap_reclaim_top_pages(current);
       return 0;
     }
   }
