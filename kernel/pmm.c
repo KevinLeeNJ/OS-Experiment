@@ -4,6 +4,7 @@
 #include "config.h"
 #include "util/string.h"
 #include "memlayout.h"
+#include "sync_utils.h"
 #include "spike_interface/spike_utils.h"
 
 // _end is defined in kernel/kernel.lds, it marks the ending (virtual) address of PKE kernel
@@ -22,6 +23,7 @@ typedef struct node {
 
 // g_free_mem_list is the head of the list of free physical memory pages
 static list_node g_free_mem_list;
+static volatile int g_pmm_lock = 0;
 
 //
 // actually creates the freepage list. each page occupies 4KB (PGSIZE), i.e., small page.
@@ -41,9 +43,11 @@ void free_page(void *pa) {
     panic("free_page 0x%lx \n", pa);
 
   // insert a physical page to g_free_mem_list
+  spin_lock(&g_pmm_lock);
   list_node *n = (list_node *)pa;
   n->next = g_free_mem_list.next;
   g_free_mem_list.next = n;
+  spin_unlock(&g_pmm_lock);
 }
 
 //
@@ -51,12 +55,14 @@ void free_page(void *pa) {
 // Allocates only ONE page!
 //
 void *alloc_page(void) {
+  uint64 hartid = read_tp();
+  spin_lock(&g_pmm_lock);
   list_node *n = g_free_mem_list.next;
-  uint64 hartid = 0;
-  if (vm_alloc_stage[hartid]) {
+  if (n) g_free_mem_list.next = n->next;
+  spin_unlock(&g_pmm_lock);
+  if (vm_alloc_stage[hartid] && n) {
     sprint("hartid = %ld: alloc page 0x%x\n", hartid, n);
   }
-  if (n) g_free_mem_list.next = n->next;
   return (void *)n;
 }
 

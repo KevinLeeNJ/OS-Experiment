@@ -41,6 +41,8 @@ smode_trap_vector:
     ld t1, 272(a0)
     csrw satp, t1
     sfence.vma zero, zero
+    # restore kernel hartid into tp, because tp is a user register in user mode.
+    ld tp, 280(a0)
 
     # jump to smode_trap_handler() that is defined in kernel/trap.c
     jr t0
