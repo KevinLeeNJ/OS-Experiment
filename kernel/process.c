@@ -179,6 +179,7 @@ int do_fork( process* parent)
 {
   sprint( "will fork a child from parent %d.\n", parent->pid );
   process* child = alloc_process();
+  int need_flush_tlb = 0;
 
   for( int i=0; i<parent->total_mapped_region; i++ ){
     // browse parent's vm space, and copy its trapframe and data segments,
@@ -192,7 +193,7 @@ int do_fork( process* parent)
           (void*)lookup_pa(parent->pagetable, parent->mapped_info[i].va), PGSIZE );
         break;
       case HEAP_SEGMENT:;
-        // build a same heap for child process.
+        // Build the same heap for child process with copy-on-write.
 
         // convert free_pages_address into a filter to skip reclaimed blocks in the heap
         // when mapping the heap blocks
@@ -205,16 +206,22 @@ int do_fork( process* parent)
             free_block_filter[index] = 1;
           }
 
-          // copy and map the heap blocks
-          for (uint64 heap_block = current->user_heap.heap_bottom;
-              heap_block < current->user_heap.heap_top; heap_block += PGSIZE) {
+          // map shared heap blocks and clear write permission for COW.
+          for (uint64 heap_block = parent->user_heap.heap_bottom;
+              heap_block < parent->user_heap.heap_top; heap_block += PGSIZE) {
             if (free_block_filter[(heap_block - heap_bottom) / PGSIZE])  // skip free blocks
               continue;
 
-            void* child_pa = alloc_page();
-            memcpy(child_pa, (void*)lookup_pa(parent->pagetable, heap_block), PGSIZE);
-            user_vm_map((pagetable_t)child->pagetable, heap_block, PGSIZE, (uint64)child_pa,
-                        prot_to_type(PROT_WRITE | PROT_READ, 1));
+            pte_t *parent_pte = page_walk(parent->pagetable, heap_block, 0);
+            if (parent_pte == 0 || (*parent_pte & PTE_V) == 0)
+              panic("do_fork: heap page is not mapped at va 0x%lx\n", heap_block);
+
+            uint64 pa = PTE2PA(*parent_pte);
+            uint64 cow_perm = (PTE_FLAGS(*parent_pte) & ~PTE_W) | PTE_COW;
+
+            *parent_pte = PA2PTE(pa) | cow_perm;
+            user_vm_map((pagetable_t)child->pagetable, heap_block, PGSIZE, pa, cow_perm);
+            need_flush_tlb = 1;
           }
 
           child->mapped_info[HEAP_SEGMENT].npages = parent->mapped_info[HEAP_SEGMENT].npages;
@@ -236,6 +243,7 @@ int do_fork( process* parent)
         for (uint64 offset = 0;offset < parent->mapped_info[i].npages * PGSIZE; offset += PGSIZE){
           uint64 va = parent->mapped_info[i].va + offset;//already aligned to page size
           uint64 pa = lookup_pa(parent->pagetable, va);
+          sprint("do_fork map code segment at pa:%lx of parent to child at va:%lx.\n", pa, va);
           user_vm_map((pagetable_t)child->pagetable, va, PGSIZE, pa,
                       prot_to_type(PROT_EXEC | PROT_READ, 1));
         }
@@ -248,6 +256,8 @@ int do_fork( process* parent)
         break;
     }
   }
+
+  if (need_flush_tlb) flush_tlb();
 
   child->status = READY;
   child->trapframe->regs.a0 = 0;

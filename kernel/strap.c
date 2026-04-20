@@ -9,6 +9,7 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "sched.h"
+#include "string.h"
 #include "util/functions.h"
 
 #include "spike_interface/spike_utils.h"
@@ -63,11 +64,28 @@ void handle_user_page_fault(uint64 mcause, uint64 sepc, uint64 stval) {
       // hint: first allocate a new physical page, and then, maps the new page to the
       // virtual address that causes the page fault.
       {
+      uint64 va = ROUNDDOWN(stval, PGSIZE); // align stval to page boundary
+      pte_t *pte = page_walk(current->pagetable, va, 0);
+
+      // COW fault: clone the shared page and remap it as writable.
+      if (pte && (*pte & PTE_V) && (*pte & PTE_COW)) {
+        uint64 old_pa = PTE2PA(*pte);
+        uint64 new_pa = (uint64)alloc_page();
+        if (new_pa == 0) {
+          panic("handle_user_page_fault: out of memory");
+        }
+
+        memcpy((void*)new_pa, (void*)old_pa, PGSIZE);
+        uint64 new_perm = (PTE_FLAGS(*pte) | PTE_W | PTE_D) & ~PTE_COW;
+        *pte = PA2PTE(new_pa) | new_perm;
+        flush_tlb();
+        break;
+      }
+
       uint64 pa = (uint64)alloc_page();
       if (pa == 0) {
         panic("handle_user_page_fault: out of memory");
       }
-      uint64 va = ROUNDDOWN(stval, PGSIZE);// align stval to page boundary
       if (map_pages(current->pagetable, va, PGSIZE, pa,
                     prot_to_type(PROT_READ | PROT_WRITE, 1)) != 0) {
         panic("handle_user_page_fault: map_pages failed");
