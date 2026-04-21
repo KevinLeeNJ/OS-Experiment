@@ -106,6 +106,8 @@ process* alloc_process();
 int free_process( process* proc );
 // fork a child from parent
 int do_fork(process* parent);
+// replace current process image with a new executable
+int do_exec(char *path);
 
 // current running process
 extern process* current;

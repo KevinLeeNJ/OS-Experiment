@@ -8,6 +8,7 @@
 #include "riscv.h"
 #include "vmm.h"
 #include "pmm.h"
+#include "hostfs.h"
 #include "spike_interface/spike_utils.h"
 
 typedef struct elf_info_t {
@@ -143,24 +144,47 @@ void load_bincode_from_host_elf(process *p) {
   size_t argc = parse_args(&arg_bug_msg);
   if (!argc) panic("You need to specify the application program!\n");
 
-  sprint("Application: %s\n", arg_bug_msg.argv[0]);
+  if (load_bincode_from_host_elf_byname(p, arg_bug_msg.argv[0]) != 0)
+    panic("Fail on loading application program.\n");
+}
+
+int load_bincode_from_host_elf_byname(process *p, const char *path) {
+  if (path == 0 || path[0] == '\0') return -1;
+
+  const char *open_path = path;
+  char host_path[MAX_PATH_LEN + 1];
+  if (path[0] == '/') {
+    size_t root_len = strlen(H_ROOT_DIR);
+    size_t path_len = strlen(path);
+    if (root_len + path_len >= sizeof(host_path)) return -1;
+    strcpy(host_path, H_ROOT_DIR);
+    strcat(host_path, path);
+    open_path = host_path;
+  }
+
+  sprint("Application: %s\n", path);
 
   //elf loading. elf_ctx is defined in kernel/elf.h, used to track the loading process.
   elf_ctx elfloader;
   // elf_info is defined above, used to tie the elf file and its corresponding process.
   elf_info info;
 
-  info.f = spike_file_open(arg_bug_msg.argv[0], O_RDONLY, 0);
+  info.f = spike_file_open(open_path, O_RDONLY, 0);
   info.p = p;
   // IS_ERR_VALUE is a macro defined in spike_interface/spike_htif.h
-  if (IS_ERR_VALUE(info.f)) panic("Fail on openning the input application program.\n");
+  if (IS_ERR_VALUE(info.f)) return -1;
 
   // init elfloader context. elf_init() is defined above.
-  if (elf_init(&elfloader, &info) != EL_OK)
-    panic("fail to init elfloader.\n");
+  if (elf_init(&elfloader, &info) != EL_OK) {
+    spike_file_close(info.f);
+    return -1;
+  }
 
   // load elf. elf_load() is defined above.
-  if (elf_load(&elfloader) != EL_OK) panic("Fail on loading elf.\n");
+  if (elf_load(&elfloader) != EL_OK) {
+    spike_file_close(info.f);
+    return -1;
+  }
 
   // entry (virtual, also physical in lab1_x) address
   p->trapframe->epc = elfloader.ehdr.entry;
@@ -169,4 +193,6 @@ void load_bincode_from_host_elf(process *p) {
   spike_file_close( info.f );
 
   sprint("Application program entry point (virtual address): 0x%lx\n", p->trapframe->epc);
+
+  return 0;
 }

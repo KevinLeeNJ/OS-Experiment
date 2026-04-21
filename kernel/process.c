@@ -172,6 +172,71 @@ int free_process( process* proc ) {
   return 0;
 }
 
+static int init_proc_exec_image(process *proc) {
+  proc->trapframe = (trapframe *)alloc_page();
+  proc->pagetable = (pagetable_t)alloc_page();
+  uint64 kstack_page = (uint64)alloc_page();
+  uint64 user_stack = (uint64)alloc_page();
+  proc->mapped_info = (mapped_region *)alloc_page();
+
+  if (!proc->trapframe || !proc->pagetable || !kstack_page || !user_stack || !proc->mapped_info)
+    return -1;
+
+  memset(proc->trapframe, 0, sizeof(trapframe));
+  memset((void *)proc->pagetable, 0, PGSIZE);
+  memset(proc->mapped_info, 0, PGSIZE);
+
+  proc->kstack = kstack_page + PGSIZE;
+  proc->trapframe->regs.sp = USER_STACK_TOP;
+
+  user_vm_map(proc->pagetable, USER_STACK_TOP - PGSIZE, PGSIZE, user_stack,
+              prot_to_type(PROT_WRITE | PROT_READ, 1));
+  proc->mapped_info[STACK_SEGMENT].va = USER_STACK_TOP - PGSIZE;
+  proc->mapped_info[STACK_SEGMENT].npages = 1;
+  proc->mapped_info[STACK_SEGMENT].seg_type = STACK_SEGMENT;
+
+  user_vm_map(proc->pagetable, (uint64)proc->trapframe, PGSIZE,
+              (uint64)proc->trapframe, prot_to_type(PROT_WRITE | PROT_READ, 0));
+  proc->mapped_info[CONTEXT_SEGMENT].va = (uint64)proc->trapframe;
+  proc->mapped_info[CONTEXT_SEGMENT].npages = 1;
+  proc->mapped_info[CONTEXT_SEGMENT].seg_type = CONTEXT_SEGMENT;
+
+  user_vm_map(proc->pagetable, (uint64)trap_sec_start, PGSIZE,
+              (uint64)trap_sec_start, prot_to_type(PROT_READ | PROT_EXEC, 0));
+  proc->mapped_info[SYSTEM_SEGMENT].va = (uint64)trap_sec_start;
+  proc->mapped_info[SYSTEM_SEGMENT].npages = 1;
+  proc->mapped_info[SYSTEM_SEGMENT].seg_type = SYSTEM_SEGMENT;
+
+  memset(&proc->user_heap, 0, sizeof(proc->user_heap));
+  proc->user_heap.heap_top = USER_FREE_ADDRESS_START;
+  proc->user_heap.heap_bottom = USER_FREE_ADDRESS_START;
+
+  proc->mapped_info[HEAP_SEGMENT].va = USER_FREE_ADDRESS_START;
+  proc->mapped_info[HEAP_SEGMENT].npages = 0;
+  proc->mapped_info[HEAP_SEGMENT].seg_type = HEAP_SEGMENT;
+
+  proc->total_mapped_region = 4;
+  return 0;
+}
+
+int do_exec(char *path) {
+  process new_proc;
+  memset(&new_proc, 0, sizeof(new_proc));
+
+  if (init_proc_exec_image(&new_proc) != 0) return -1;
+  if (load_bincode_from_host_elf_byname(&new_proc, path) != 0) return -1;
+
+  current->trapframe = new_proc.trapframe;
+  current->pagetable = new_proc.pagetable;
+  current->kstack = new_proc.kstack;
+  current->mapped_info = new_proc.mapped_info;
+  current->total_mapped_region = new_proc.total_mapped_region;
+  current->user_heap = new_proc.user_heap;
+  current->tick_count = 0;
+
+  return 0;
+}
+
 //
 // implements fork syscal in kernel. added @lab3_1
 // basic idea here is to first allocate an empty process (child), then duplicate the
