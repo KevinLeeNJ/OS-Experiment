@@ -78,6 +78,20 @@ void yield() {
 }
 
 //
+// lib call to exec
+//
+int exec(const char *pathname, const char *arg) {
+  return do_user_call(SYS_user_exec, (uint64)pathname, (uint64)arg, 0, 0, 0, 0, 0);
+}
+
+//
+// lib call to wait
+//
+int wait(int pid) {
+  return do_user_call(SYS_user_wait, pid, 0, 0, 0, 0, 0, 0);
+}
+
+//
 // lib call to open
 //
 int open(const char *pathname, int flags) {

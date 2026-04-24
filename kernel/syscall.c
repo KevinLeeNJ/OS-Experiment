@@ -13,9 +13,66 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "sched.h"
+#include "elf.h"
+#include "memlayout.h"
 #include "proc_file.h"
 
 #include "spike_interface/spike_utils.h"
+
+extern process procs[NPROC];
+
+static void clear_exec_vmspace(process *proc) {
+  for (int i = 4; i < proc->total_mapped_region; i++) {
+    mapped_region *region = &proc->mapped_info[i];
+    int reclaim_page = (region->seg_type != CODE_SEGMENT);
+    for (uint32 page_idx = 0; page_idx < region->npages; page_idx++) {
+      uint64 va = region->va + (uint64)page_idx * PGSIZE;
+      pte_t *pte = page_walk((pagetable_t)proc->pagetable, va, 0);
+      if (!pte || ((*pte & PTE_V) == 0)) continue;
+      if (reclaim_page) free_page((void *)PTE2PA(*pte));
+      *pte &= ~PTE_V;
+    }
+
+    region->va = 0;
+    region->npages = 0;
+    region->seg_type = 0;
+  }
+  proc->total_mapped_region = 4;
+
+  proc->mapped_info[HEAP_SEGMENT].npages = 0;
+  proc->user_heap.heap_bottom = USER_FREE_ADDRESS_START;
+  proc->user_heap.heap_top = USER_FREE_ADDRESS_START;
+  proc->user_heap.free_pages_count = 0;
+
+  uint64 stack_pa = lookup_pa((pagetable_t)proc->pagetable, USER_STACK_TOP - PGSIZE);
+  if (stack_pa) memset((void *)stack_pa, 0, PGSIZE);
+  proc->trapframe->regs.sp = USER_STACK_TOP;
+
+  flush_tlb();
+}
+
+static int setup_exec_args(process *proc, const char *arg) {
+  uint64 sp = USER_STACK_TOP;
+  size_t arg_len = strlen(arg) + 1;
+  if (arg_len > PGSIZE / 2) return -1;
+
+  sp -= arg_len;
+  sp = ROUNDDOWN(sp, sizeof(uint64));
+  char *arg_buf = (char *)user_va_to_pa((pagetable_t)proc->pagetable, (void *)sp);
+  if (!arg_buf) return -1;
+  memcpy(arg_buf, arg, arg_len);
+
+  uint64 argv_va = sp - 2 * sizeof(uint64);
+  argv_va = ROUNDDOWN(argv_va, 16);
+  uint64 *argv = (uint64 *)user_va_to_pa((pagetable_t)proc->pagetable, (void *)argv_va);
+  if (!argv) return -1;
+  argv[0] = sp;
+  argv[1] = 0;
+
+  proc->trapframe->regs.sp = argv_va;
+  proc->trapframe->regs.a1 = argv_va;
+  return 1;
+}
 
 //
 // implement the SYS_user_print syscall
@@ -35,7 +92,14 @@ ssize_t sys_user_print(const char* buf, size_t n) {
 ssize_t sys_user_exit(uint64 code) {
   sprint("User exit with code:%d.\n", code);
   // reclaim the current process, and reschedule. added @lab3_1
-  free_process( current );
+  process *proc = current;
+  process *parent = proc->parent;
+  free_process(proc);
+
+  if (parent && parent->status == BLOCKED && parent->waitpid == (int)proc->pid) {
+    parent->waitpid = -1;
+    insert_to_ready_queue(parent);
+  }
   schedule();
   return 0;
 }
@@ -92,6 +156,35 @@ ssize_t sys_user_yield() {
   // the rear of ready queue, and finally, schedule a READY process to run.
   current->status = READY;
   insert_to_ready_queue(current);
+  schedule();
+
+  return 0;
+}
+
+ssize_t sys_user_exec(char *pathva, char *argva) {
+  char *pathpa = (char *)user_va_to_pa((pagetable_t)(current->pagetable), (void *)pathva);
+  char *argpa = (char *)user_va_to_pa((pagetable_t)(current->pagetable), (void *)argva);
+  if (!pathpa || !argpa) return -1;
+
+  clear_exec_vmspace(current);
+  load_bincode_from_host_elf(current, pathpa);
+
+  int argc = setup_exec_args(current, argpa);
+  if (argc < 0) return -1;
+  current->trapframe->regs.a0 = argc;
+  return argc;
+}
+
+ssize_t sys_user_wait(int pid) {
+  if (pid < 0 || pid >= NPROC) return -1;
+  process *child = &procs[pid];
+  if (child->parent != current) return -1;
+
+  if (child->status == ZOMBIE || child->status == FREE) return 0;
+
+  current->waitpid = pid;
+  current->status = BLOCKED;
+  current->trapframe->regs.a0 = 0;
   schedule();
 
   return 0;
@@ -263,6 +356,11 @@ long do_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long a6, l
       return sys_user_link((char *)a1, (char *)a2);
     case SYS_user_unlink:
       return sys_user_unlink((char *)a1);
+    // added @lab4_challenge3
+    case SYS_user_exec:
+      return sys_user_exec((char *)a1, (char *)a2);
+    case SYS_user_wait:
+      return sys_user_wait(a1);
     default:
       panic("Unknown syscall %ld \n", a0);
   }

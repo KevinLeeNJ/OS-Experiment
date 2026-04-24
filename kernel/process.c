@@ -79,6 +79,7 @@ void init_proc_pool() {
   for (int i = 0; i < NPROC; ++i) {
     procs[i].status = FREE;
     procs[i].pid = i;
+    procs[i].waitpid = -1;
   }
 }
 
@@ -154,6 +155,11 @@ process* alloc_process() {
   // initialize files_struct
   procs[i].pfiles = init_proc_file_management();
   sprint("in alloc_proc. build proc_file_management successfully.\n");
+
+  procs[i].waitpid = -1;
+  procs[i].parent = NULL;
+  procs[i].queue_next = NULL;
+  procs[i].tick_count = 0;
 
   // return after initialization.
   return &procs[i];
@@ -238,6 +244,7 @@ int do_fork( process* parent)
         for (uint64 offset = 0;offset < parent->mapped_info[i].npages * PGSIZE; offset += PGSIZE){
           uint64 va = parent->mapped_info[i].va + offset;//already aligned to page size
           uint64 pa = lookup_pa(parent->pagetable, va);
+          sprint("do_fork map code segment at pa:%016lx of parent to child at va:%016lx.\n", pa, va);
           user_vm_map((pagetable_t)child->pagetable, va, PGSIZE, pa,
                       prot_to_type(PROT_EXEC | PROT_READ, 1));
         }

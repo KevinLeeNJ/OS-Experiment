@@ -85,6 +85,8 @@ typedef struct process_t {
   int status;
   // parent process
   struct process_t *parent;
+  // waited child pid, -1 means not waiting
+  int waitpid;
   // next queue element
   struct process_t *queue_next;
 
